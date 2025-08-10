@@ -136,26 +136,45 @@ class TwicketsMonitor:
             chrome_options.add_argument('--disable-web-security')
             chrome_options.add_argument('--allow-running-insecure-content')
             chrome_options.add_argument('--disable-features=VizDisplayCompositor')
+            chrome_options.add_argument('--disable-background-timer-throttling')
+            chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+            chrome_options.add_argument('--disable-renderer-backgrounding')
             chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
             
-            # Try different Chrome binary locations for Streamlit Cloud
-            chrome_paths = [
-                '/usr/bin/chromium-browser',
-                '/usr/bin/chromium',
-                '/usr/bin/google-chrome',
-                '/usr/bin/google-chrome-stable'
-            ]
-            
-            for chrome_path in chrome_paths:
-                if os.path.exists(chrome_path):
-                    chrome_options.binary_location = chrome_path
-                    break
-            
-            self.driver = webdriver.Chrome(options=chrome_options)
-            logging.info("Chrome driver initialized successfully")
-            return True
+            # For Streamlit Cloud - try webdriver-manager first
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager
+                from selenium.webdriver.chrome.service import Service
+                
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                logging.info("Chrome driver initialized with webdriver-manager")
+                return True
+            except Exception as e:
+                logging.warning(f"webdriver-manager failed: {e}")
+                
+                # Fallback to system Chrome
+                chrome_paths = [
+                    '/usr/bin/chromium',
+                    '/usr/bin/chromium-browser', 
+                    '/usr/bin/google-chrome',
+                    '/usr/bin/google-chrome-stable',
+                    '/snap/bin/chromium'
+                ]
+                
+                for chrome_path in chrome_paths:
+                    if os.path.exists(chrome_path):
+                        chrome_options.binary_location = chrome_path
+                        logging.info(f"Found Chrome at: {chrome_path}")
+                        break
+                
+                self.driver = webdriver.Chrome(options=chrome_options)
+                logging.info("Chrome driver initialized with system Chrome")
+                return True
+                
         except Exception as e:
             logging.error(f"Failed to initialize Chrome driver: {e}")
+            st.error(f"⚠️ Browser setup failed. This might be a temporary issue with Streamlit Cloud. Error: {e}")
             return False
     
     def get_ticket_details(self):
