@@ -15,6 +15,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import re
 
+# For Streamlit Cloud compatibility
+try:
+    import chromedriver_autoinstaller
+    chromedriver_autoinstaller.install()
+except ImportError:
+    pass
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -116,7 +123,7 @@ class TwicketsMonitor:
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
     
     def setup_driver(self):
-        """Setup Chrome driver with headless options"""
+        """Setup Chrome driver with headless options for Streamlit Cloud"""
         try:
             chrome_options = Options()
             chrome_options.add_argument('--headless')
@@ -124,7 +131,25 @@ class TwicketsMonitor:
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--remote-debugging-port=9222')
+            chrome_options.add_argument('--disable-extensions')
+            chrome_options.add_argument('--disable-web-security')
+            chrome_options.add_argument('--allow-running-insecure-content')
+            chrome_options.add_argument('--disable-features=VizDisplayCompositor')
             chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+            
+            # Try different Chrome binary locations for Streamlit Cloud
+            chrome_paths = [
+                '/usr/bin/chromium-browser',
+                '/usr/bin/chromium',
+                '/usr/bin/google-chrome',
+                '/usr/bin/google-chrome-stable'
+            ]
+            
+            for chrome_path in chrome_paths:
+                if os.path.exists(chrome_path):
+                    chrome_options.binary_location = chrome_path
+                    break
             
             self.driver = webdriver.Chrome(options=chrome_options)
             logging.info("Chrome driver initialized successfully")
