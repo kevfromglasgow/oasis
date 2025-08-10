@@ -87,8 +87,10 @@ class TwicketsMonitor:
     def remove_subscriber(self, email):
         """Remove a subscriber"""
         email = email.lower().strip()
+        original_count = len(self.subscribers)
         self.subscribers = [s for s in self.subscribers if s['email'] != email]
         self.save_subscribers()
+        return len(self.subscribers) < original_count  # Return True if someone was actually removed
     
     def get_subscriber_count(self):
         """Get number of active subscribers"""
@@ -357,6 +359,18 @@ def stop_monitoring():
     if monitor:
         monitor.is_running = False
 
+def is_admin_authenticated():
+    """Check if admin is authenticated"""
+    return st.session_state.get('admin_authenticated', False)
+
+def authenticate_admin(password):
+    """Authenticate admin with password"""
+    admin_password = st.secrets.get("admin", {}).get("password", None)
+    if admin_password and password == admin_password:
+        st.session_state.admin_authenticated = True
+        return True
+    return False
+
 def main():
     st.set_page_config(
         page_title="Oasis Ticket Checker",
@@ -378,22 +392,61 @@ def main():
     if not monitor:
         st.stop()
     
+    # Show last check time prominently at the top
+    status = monitor.get_status()
+    if status.get('last_check'):
+        last_check = datetime.fromisoformat(status['last_check'])
+        time_diff = datetime.now() - last_check
+        
+        if time_diff.total_seconds() < 60:
+            time_ago = f"{int(time_diff.total_seconds())} seconds ago"
+            status_color = "🟢"
+        elif time_diff.total_seconds() < 3600:
+            time_ago = f"{int(time_diff.total_seconds() / 60)} minutes ago"
+            status_color = "🟡" if time_diff.total_seconds() > 300 else "🟢"
+        else:
+            time_ago = f"{int(time_diff.total_seconds() / 3600)} hours ago"
+            status_color = "🔴"
+        
+        st.info(f"{status_color} **Last ticket check:** {last_check.strftime('%H:%M:%S on %Y-%m-%d')} ({time_ago})")
+    else:
+        st.warning("⏸️ **Monitoring not started yet** - No checks performed")
+    
+    st.markdown("---")
+    
     # Sidebar for admin controls
     with st.sidebar:
         st.header("⚙️ Admin Controls")
         
-        if st.button("🚀 Start Monitoring"):
-            if start_monitoring():
-                st.success("Monitoring started!")
-                st.info("🔄 Using lightweight HTTP monitoring (Streamlit Cloud compatible)")
-            else:
-                st.info("Monitoring is already running")
+        # Admin authentication
+        if not is_admin_authenticated():
+            admin_password = st.text_input("Admin Password", type="password", key="admin_login")
+            if st.button("Login"):
+                if authenticate_admin(admin_password):
+                    st.success("Admin authenticated!")
+                    st.rerun()
+                else:
+                    st.error("Invalid admin password")
+            st.info("Admin access required for controls")
+        else:
+            st.success("🔓 Admin authenticated")
+            
+            if st.button("🚀 Start Monitoring"):
+                if start_monitoring():
+                    st.success("Monitoring started!")
+                    st.info("🔄 Using lightweight HTTP monitoring (Streamlit Cloud compatible)")
+                else:
+                    st.info("Monitoring is already running")
+            
+            if st.button("⏹️ Stop Monitoring"):
+                stop_monitoring()
+                st.success("Monitoring stopped!")
+            
+            if st.button("🚪 Logout"):
+                st.session_state.admin_authenticated = False
+                st.rerun()
         
-        if st.button("⏹️ Stop Monitoring"):
-            stop_monitoring()
-            st.success("Monitoring stopped!")
-        
-        # Status display
+        # Status display (visible to all users)
         status = monitor.get_status()
         st.subheader("📊 Status")
         
@@ -409,6 +462,34 @@ def main():
         st.write(f"**Total Checks:** {status.get('total_checks', 0)}")
         st.write(f"**Tickets Found:** {status.get('tickets_found', 0)}")
         st.write(f"**Subscribers:** {status.get('subscriber_count', 0)}")
+        
+        # Admin-only subscriber management
+        if is_admin_authenticated():
+            st.markdown("---")
+            st.subheader("👥 Subscriber Management")
+            
+            subscribers = monitor.load_subscribers()
+            if subscribers:
+                st.write(f"**{len(subscribers)} Active Subscribers:**")
+                
+                # Show subscriber list (admin only)
+                with st.expander("View All Subscribers"):
+                    df = pd.DataFrame(subscribers)
+                    df['subscribed_at'] = pd.to_datetime(df['subscribed_at']).dt.strftime('%Y-%m-%d %H:%M')
+                    st.dataframe(df[['name', 'email', 'subscribed_at']], use_container_width=True)
+                
+                # Admin unsubscribe
+                with st.expander("Remove Subscriber"):
+                    email_to_remove = st.selectbox("Select email to remove:", 
+                                                 [s['email'] for s in subscribers])
+                    if st.button("Remove Subscriber", type="secondary"):
+                        if monitor.remove_subscriber(email_to_remove):
+                            st.success(f"Removed {email_to_remove}")
+                            st.rerun()
+                        else:
+                            st.error("Email not found")
+            else:
+                st.info("No subscribers yet")
         
         # Add Oasis-themed styling
         st.markdown("---")
@@ -440,15 +521,18 @@ def main():
                 else:
                     st.error("Please enter an email address")
         
-        # Unsubscribe section
+        # Public unsubscribe section (self-service)
         st.header("🔕 Unsubscribe")
+        st.markdown("*Only unsubscribe your own email address*")
         with st.form("unsubscribe_form"):
-            unsub_email = st.text_input("Email to unsubscribe", placeholder="email@example.com")
+            unsub_email = st.text_input("Your email address", placeholder="email@example.com")
             unsub_submitted = st.form_submit_button("Unsubscribe")
             
             if unsub_submitted and unsub_email:
-                monitor.remove_subscriber(unsub_email)
-                st.success("Email unsubscribed successfully! **Stop Crying Your Heart Out** - you can always re-subscribe!")
+                if monitor.remove_subscriber(unsub_email):
+                    st.success("Email unsubscribed successfully! **Stop Crying Your Heart Out** - you can always re-subscribe!")
+                else:
+                    st.warning("Email not found in our subscription list.")
     
     with col2:
         st.header("ℹ️ How it works")
@@ -467,16 +551,19 @@ def main():
             st.markdown(f"🎸 [View Oasis Event on Twickets]({event_url})")
         
         st.markdown("---")
-        st.subheader("📋 Current Subscribers")
-        st.markdown("**All the people who believe in Oasis tickets:**")
+        st.subheader("🎸 Supersonic Fans")
         
-        subscribers = monitor.load_subscribers()
-        if subscribers:
-            df = pd.DataFrame(subscribers)
-            df['subscribed_at'] = pd.to_datetime(df['subscribed_at']).dt.strftime('%Y-%m-%d %H:%M')
-            st.dataframe(df[['name', 'email', 'subscribed_at']], use_container_width=True)
+        # Show only subscriber count publicly (privacy-safe)
+        subscriber_count = monitor.get_subscriber_count()
+        if subscriber_count > 0:
+            st.success(f"🌟 **{subscriber_count} Supersonic fans** are already subscribed!")
+            st.markdown("*Join the crowd waiting for the comeback!*")
         else:
-            st.info("**Waiting for Supersonic fans to subscribe!** 🚀")
+            st.info("**Be the first Supersonic fan to subscribe!** 🚀")
+        
+        # Privacy notice
+        st.markdown("---")
+        st.caption("🔒 **Privacy**: Your email is only used for ticket alerts and is kept secure.")
 
 if __name__ == "__main__":
     main()
