@@ -6,30 +6,18 @@ import threading
 import time
 from datetime import datetime
 import logging
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import NoSuchElementException, WebDriverException
+import requests
+from bs4 import BeautifulSoup
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import re
-
-# For Streamlit Cloud compatibility
-try:
-    import chromedriver_autoinstaller
-    chromedriver_autoinstaller.install()
-except ImportError:
-    pass
+import hashlib
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('twickets_monitor.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 # File to store user subscriptions
@@ -43,11 +31,19 @@ class TwicketsMonitor:
         self.sender_password = sender_password
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
-        self.driver = None
         self.known_tickets = set()
         self.is_running = False
         self.last_check = None
         self.subscribers = self.load_subscribers()
+        self.session = requests.Session()
+        # Set up session with headers
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        })
         
     def load_subscribers(self):
         """Load subscribers from file"""
@@ -121,131 +117,63 @@ class TwicketsMonitor:
         except Exception as e:
             logging.error(f"Error getting status: {e}")
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
-    
-    def setup_driver(self):
-        """Setup Chrome driver with headless options for Streamlit Cloud"""
-        try:
-            chrome_options = Options()
-            chrome_options.add_argument('--headless')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--remote-debugging-port=9222')
-            chrome_options.add_argument('--disable-extensions')
-            chrome_options.add_argument('--disable-web-security')
-            chrome_options.add_argument('--allow-running-insecure-content')
-            chrome_options.add_argument('--disable-features=VizDisplayCompositor')
-            chrome_options.add_argument('--disable-background-timer-throttling')
-            chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-            chrome_options.add_argument('--disable-renderer-backgrounding')
-            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
-            
-            # For Streamlit Cloud - try webdriver-manager first
-            try:
-                from webdriver_manager.chrome import ChromeDriverManager
-                from selenium.webdriver.chrome.service import Service
-                
-                service = Service(ChromeDriverManager().install())
-                self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                logging.info("Chrome driver initialized with webdriver-manager")
-                return True
-            except Exception as e:
-                logging.warning(f"webdriver-manager failed: {e}")
-                
-                # Fallback to system Chrome
-                chrome_paths = [
-                    '/usr/bin/chromium',
-                    '/usr/bin/chromium-browser', 
-                    '/usr/bin/google-chrome',
-                    '/usr/bin/google-chrome-stable',
-                    '/snap/bin/chromium'
-                ]
-                
-                for chrome_path in chrome_paths:
-                    if os.path.exists(chrome_path):
-                        chrome_options.binary_location = chrome_path
-                        logging.info(f"Found Chrome at: {chrome_path}")
-                        break
-                
-                self.driver = webdriver.Chrome(options=chrome_options)
-                logging.info("Chrome driver initialized with system Chrome")
-                return True
-                
-        except Exception as e:
-            logging.error(f"Failed to initialize Chrome driver: {e}")
-            st.error(f"⚠️ Browser setup failed. This might be a temporary issue with Streamlit Cloud. Error: {e}")
-            return False
-    
-    def get_ticket_details(self):
-        """Extract ticket details to create unique identifiers"""
-        ticket_details = []
-        try:
-            ticket_selectors = [
-                '//*[@id="list"]//div[contains(@class, "listing")]',
-                '//*[@id="list"]//div[contains(@class, "ticket")]',
-                '//*[@id="list"]//div[contains(@class, "item")]',
-                '//*[@id="list"]//li',
-                '//*[@id="list"]//*[contains(@data-testid, "listing")]'
-            ]
-            
-            for selector in ticket_selectors:
-                tickets = self.driver.find_elements(By.XPATH, selector)
-                if tickets:
-                    for ticket in tickets:
-                        try:
-                            ticket_text = ticket.text.strip()
-                            ticket_id = ticket.get_attribute('data-id') or ticket.get_attribute('id')
-                            
-                            price_elements = ticket.find_elements(By.XPATH, './/*[contains(@class, "price") or contains(text(), "£") or contains(text(), "$")]')
-                            price = price_elements[0].text.strip() if price_elements else ""
-                            
-                            section_elements = ticket.find_elements(By.XPATH, './/*[contains(@class, "section") or contains(@class, "seat") or contains(@class, "block")]')
-                            section = section_elements[0].text.strip() if section_elements else ""
-                            
-                            unique_id = f"{ticket_id}_{price}_{section}_{ticket_text[:50]}"
-                            ticket_details.append({
-                                'id': unique_id,
-                                'text': ticket_text,
-                                'price': price,
-                                'section': section
-                            })
-                        except Exception as e:
-                            logging.debug(f"Error extracting ticket detail: {e}")
-                            continue
-                    break
-                    
-        except Exception as e:
-            logging.error(f"Error getting ticket details: {e}")
-            
-        return ticket_details
 
     def check_tickets(self):
-        """Check if NEW tickets are available on the page"""
+        """Check if NEW tickets are available using HTTP requests"""
         try:
-            self.driver.get(self.url)
-            time.sleep(3)
+            # Make request to the page
+            response = self.session.get(self.url, timeout=10)
+            response.raise_for_status()
             
-            try:
-                no_listings = self.driver.find_element(By.XPATH, '//*[@id="no-listings-found"]')
-                if no_listings.is_displayed():
-                    logging.info("No tickets available")
-                    return []
-            except NoSuchElementException:
-                pass
+            # Parse HTML
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            current_tickets = self.get_ticket_details()
+            # Check for "no listings found" message
+            no_listings = soup.find(id="no-listings-found")
+            if no_listings and no_listings.is_displayed if hasattr(no_listings, 'is_displayed') else True:
+                logging.info("No tickets available")
+                return []
             
-            if not current_tickets:
-                try:
-                    ticket_list = self.driver.find_element(By.XPATH, '//*[@id="list"]')
-                    if ticket_list:
-                        buy_buttons = self.driver.find_elements(By.XPATH, '//*[@id="list"]//button[contains(@class, "buy") or contains(text(), "Buy")]')
-                        if buy_buttons:
-                            current_tickets = [{'id': f'generic_{i}', 'text': f'Ticket {i+1}'} for i in range(len(buy_buttons))]
-                except NoSuchElementException:
-                    pass
+            # Look for ticket listings
+            current_tickets = []
+            ticket_list = soup.find(id="list")
             
+            if ticket_list:
+                # Look for various ticket elements
+                ticket_elements = (
+                    ticket_list.find_all('div', class_=lambda x: x and 'listing' in x.lower()) +
+                    ticket_list.find_all('div', class_=lambda x: x and 'ticket' in x.lower()) +
+                    ticket_list.find_all('li') +
+                    ticket_list.find_all('div', class_=lambda x: x and 'item' in x.lower())
+                )
+                
+                for i, element in enumerate(ticket_elements):
+                    try:
+                        # Extract text content
+                        text_content = element.get_text(strip=True)
+                        
+                        # Skip if too short or empty
+                        if len(text_content) < 10:
+                            continue
+                            
+                        # Look for price indicators
+                        price_match = re.search(r'[£$€]\s*\d+', text_content)
+                        price = price_match.group() if price_match else ""
+                        
+                        # Create unique identifier
+                        unique_id = hashlib.md5(f"{text_content}_{price}".encode()).hexdigest()[:16]
+                        
+                        current_tickets.append({
+                            'id': unique_id,
+                            'text': text_content[:200],  # Limit text length
+                            'price': price
+                        })
+                        
+                    except Exception as e:
+                        logging.debug(f"Error processing ticket element: {e}")
+                        continue
+            
+            # Check for new tickets
             if current_tickets:
                 current_ticket_ids = {ticket['id'] for ticket in current_tickets}
                 new_ticket_ids = current_ticket_ids - self.known_tickets
@@ -259,9 +187,12 @@ class TwicketsMonitor:
                     logging.info("No new tickets (same tickets as before)")
                     return []
             else:
-                logging.info("No tickets available")
+                logging.info("No tickets found")
                 return []
             
+        except requests.RequestException as e:
+            logging.error(f"Request error: {e}")
+            return []
         except Exception as e:
             logging.error(f"Error checking tickets: {e}")
             return []
@@ -287,10 +218,8 @@ class TwicketsMonitor:
                     tickets_info += f"\nTicket {i}:\n"
                     if ticket.get('price'):
                         tickets_info += f"  Price: {ticket['price']}\n"
-                    if ticket.get('section'):
-                        tickets_info += f"  Section: {ticket['section']}\n"
-                    if ticket.get('text') and len(ticket['text']) > 10:
-                        tickets_info += f"  Details: {ticket['text'][:100]}...\n"
+                    if ticket.get('text'):
+                        tickets_info += f"  Details: {ticket['text'][:150]}...\n"
                     tickets_info += "\n"
                 
                 name = subscriber.get('name', 'Oasis Fan')
@@ -339,11 +268,7 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
         return successful_sends, failed_sends
 
     def monitor_loop(self, check_interval=30):
-        """Main monitoring loop (runs in background thread)"""
-        if not self.setup_driver():
-            logging.error("Failed to setup driver")
-            return
-        
+        """Main monitoring loop (runs in background thread)"""        
         status = self.get_status()
         total_checks = status.get('total_checks', 0)
         tickets_found = status.get('tickets_found', 0)
@@ -381,8 +306,6 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
         except Exception as e:
             logging.error(f"Error in monitoring loop: {e}")
         finally:
-            if self.driver:
-                self.driver.quit()
             self.update_status({
                 'is_running': False,
                 'last_check': datetime.now().isoformat(),
@@ -462,6 +385,7 @@ def main():
         if st.button("🚀 Start Monitoring"):
             if start_monitoring():
                 st.success("Monitoring started!")
+                st.info("🔄 Using lightweight HTTP monitoring (Streamlit Cloud compatible)")
             else:
                 st.info("Monitoring is already running")
         
