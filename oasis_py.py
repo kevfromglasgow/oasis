@@ -87,9 +87,9 @@ class TwicketsMonitor:
     def notify_new_subscriber_of_current_tickets(self, email, name):
         """Check for current tickets and notify new subscriber immediately"""
         try:
-            # Note: We call check_tickets, but it won't trigger notifications for others,
-            # it just returns the list of available tickets.
-            current_tickets = self.check_tickets() 
+            # Temporarily clear known_tickets to get a fresh list of what's currently available
+            self.known_tickets = set()
+            current_tickets = self.check_tickets()
             if current_tickets:
                 logging.info(f"Found {len(current_tickets)} current tickets for new subscriber {email}")
                 self.send_welcome_email_with_current_tickets(email, name, current_tickets)
@@ -190,50 +190,87 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
 
     def check_tickets(self):
-        """Check if NEW tickets are available using a more robust scraping method."""
+        """
+        Check if NEW tickets are available using an updated scraping method
+        to match the latest site structure (as of Aug 2025).
+        """
         try:
             logging.info(f"Requesting URL: {self.url}")
             response = self.session.get(self.url, timeout=15)
             response.raise_for_status()
+
             soup = BeautifulSoup(response.content, 'html.parser')
+
             ticket_list_container = soup.find(id="list")
+
             no_listings_found = soup.find(id="no-listings-found")
-            if not ticket_list_container or (no_listings_found and 'display: none' not in no_listings_found.get('style', '')):
+            # The 'hidden' attribute is a more reliable check than style
+            if not ticket_list_container or (no_listings_found and not no_listings_found.has_attr('hidden')):
+                logging.info("No ticket container or 'no-listings-found' element is visible. No tickets available.")
                 self.known_tickets = set()
                 return []
-            listing_elements = ticket_list_container.find_all('div', class_='listing')
+
+            # --- FIX #1: The website now uses a custom <twickets-listing> tag ---
+            listing_elements = ticket_list_container.find_all('twickets-listing')
+
             if not listing_elements:
+                logging.info("Found ticket container, but it contains no '<twickets-listing>' elements.")
                 self.known_tickets = set()
                 return []
+
             current_tickets = []
             for listing in listing_elements:
                 try:
+                    # This selector for the details is still correct.
                     details_element = listing.select_one('[id^="listingSeatDetails"]')
-                    if not details_element: continue
+                    if not details_element:
+                        continue 
                     details_text = details_element.get_text(strip=True)
-                    price_element = listing.find('span', class_='price')
-                    price = price_element.get_text(strip=True) if price_element else "Price not found"
+
+                    # --- FIX #2: Extract price from the summary string ---
+                    price = "Price not found"
+                    summary_element = listing.select_one('[id^="listingTicketSummary"]')
+                    if summary_element:
+                        summary_text = summary_element.get_text(strip=True)
+                        price_match = re.search(r'£\s?[\d,.]+', summary_text)
+                        if price_match:
+                            price = price_match.group(0)
+
                     unique_id = hashlib.md5(details_text.encode()).hexdigest()
-                    current_tickets.append({'id': unique_id, 'text': details_text, 'price': price})
+
+                    current_tickets.append({
+                        'id': unique_id,
+                        'text': details_text,
+                        'price': price
+                    })
                 except Exception as e:
                     logging.warning(f"Could not parse a specific ticket listing. Error: {e}")
                     continue
+
             if not current_tickets:
+                logging.info("No valid tickets could be parsed from the listings.")
                 self.known_tickets = set()
                 return []
+            
             current_ticket_ids = {ticket['id'] for ticket in current_tickets}
+            
             if not self.known_tickets:
+                logging.info(f"Establishing baseline with {len(current_ticket_ids)} found tickets.")
                 self.known_tickets = current_ticket_ids
-                return [] 
+                return current_tickets
+            
             new_ticket_ids = current_ticket_ids - self.known_tickets
+
             if new_ticket_ids:
                 new_tickets = [t for t in current_tickets if t['id'] in new_ticket_ids]
                 logging.info(f"SUCCESS: Found {len(new_tickets)} new tickets!")
                 self.known_tickets.update(new_ticket_ids)
                 return new_tickets
             else:
+                logging.info("No new tickets found. Current listings are the same as before.")
                 self.known_tickets = self.known_tickets.intersection(current_ticket_ids)
                 return []
+
         except requests.RequestException as e:
             logging.error(f"Request error while checking tickets: {e}")
             return []
@@ -452,7 +489,7 @@ def is_admin_authenticated():
 
 def authenticate_admin(password):
     """Authenticate admin with password"""
-    admin_password = st.secrets.get("admin", {}).get("password", "admin") # Default password if not set
+    admin_password = st.secrets.get("admin", {}).get("password", "admin")
     if admin_password and password == admin_password:
         st.session_state.admin_authenticated = True
         return True
