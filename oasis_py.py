@@ -438,9 +438,40 @@ def main():
                 else:
                     st.info("Monitoring is already running")
             
+            if st.button("🔄 Initialize Baseline"):
+                if monitor:
+                    st.info("Checking current tickets to establish baseline...")
+                    current_tickets = monitor.check_tickets()
+                    if current_tickets:
+                        # Set these as known tickets without sending notifications
+                        current_ticket_ids = {ticket['id'] for ticket in current_tickets}
+                        monitor.known_tickets = current_ticket_ids
+                        st.success(f"✅ Baseline set! Found {len(current_tickets)} existing tickets. Future alerts will only be for NEW tickets.")
+                    else:
+                        st.success("✅ No tickets currently available. Will alert when new tickets appear!")
+                else:
+                    st.error("Monitor not initialized")
+            
             if st.button("⏹️ Stop Monitoring"):
                 stop_monitoring()
                 st.success("Monitoring stopped!")
+            
+            if st.button("🧪 Test Email System"):
+                if monitor and monitor.subscribers:
+                    st.info("Sending test email to all subscribers...")
+                    # Create a fake "new ticket" for testing
+                    test_tickets = [{
+                        'id': 'test_123',
+                        'text': 'TEST TICKET: Oasis Live Forever Tour - Manchester Arena',
+                        'price': '£150'
+                    }]
+                    successful, failed = monitor.send_email_notifications(test_tickets)
+                    if successful > 0:
+                        st.success(f"✅ Test emails sent successfully to {successful} subscribers!")
+                    if failed > 0:
+                        st.error(f"❌ Failed to send {failed} test emails. Check email configuration.")
+                else:
+                    st.warning("No subscribers to test with or monitor not initialized")
             
             if st.button("🚪 Logout"):
                 st.session_state.admin_authenticated = False
