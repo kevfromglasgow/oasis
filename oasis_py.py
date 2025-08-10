@@ -36,10 +36,8 @@ class TwicketsMonitor:
         self.last_check = None
         self.subscribers = self.load_subscribers()
         self.session = requests.Session()
-        # New attributes for 'First Dibs' feature
         self.admin_email = admin_email
         self.first_dibs_delay = first_dibs_delay
-        # Set up session with headers
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -85,16 +83,18 @@ class TwicketsMonitor:
         return True, "Successfully subscribed!"
 
     def notify_new_subscriber_of_current_tickets(self, email, name):
-        """Check for current tickets and notify new subscriber immediately"""
+        """Check for current tickets and notify new subscriber immediately."""
         try:
-            # Temporarily clear known_tickets to get a fresh list of what's currently available
             self.known_tickets = set()
             current_tickets = self.check_tickets()
+            
             if current_tickets:
                 logging.info(f"Found {len(current_tickets)} current tickets for new subscriber {email}")
                 self.send_welcome_email_with_current_tickets(email, name, current_tickets)
             else:
-                logging.info(f"No current tickets to notify new subscriber {email}")
+                logging.info(f"No current tickets. Sending welcome confirmation to new subscriber {email}")
+                self.send_welcome_confirmation_email(email, name)
+                
         except Exception as e:
             logging.error(f"Error checking current tickets for new subscriber: {e}")
 
@@ -143,19 +143,56 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
             """
             
             msg.attach(MIMEText(body, 'plain'))
-            
             server = smtplib.SMTP(self.smtp_server, self.smtp_port)
             server.starttls()
             server.login(self.sender_email, self.sender_password)
-            text = msg.as_string()
-            server.sendmail(self.sender_email, email, text)
+            server.sendmail(self.sender_email, email, msg.as_string())
             server.quit()
-            
             logging.info(f"Welcome email with current tickets sent successfully to {email}")
             return True
-            
         except Exception as e:
             logging.error(f"Failed to send welcome email to {email}: {e}")
+            return False
+
+    def send_welcome_confirmation_email(self, email, name):
+        """Send a simple welcome/confirmation email when no tickets are currently available."""
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = self.sender_email
+            msg['To'] = email
+            msg['Subject'] = "✅ You're Subscribed to Oasis Ticket Alerts!"
+            
+            display_name = name if name else 'Oasis Fan'
+            body = f"""
+Hi {display_name}!
+
+🎸 WELCOME TO THE OASIS TICKET ALERTS! 🎸
+
+You're all set! We've successfully added you to the notification list.
+
+There are no tickets available right now, but don't worry – you're in the queue. The moment new tickets are listed, you'll receive an instant email alert from us.
+
+Stay tuned, and get ready to witness the comeback!
+
+Time of subscription: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+You're gonna Live Forever with these Oasis memories!
+Rock and Roll Star treatment is on the way! 🌟
+
+---
+To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
+            """
+            
+            msg.attach(MIMEText(body, 'plain'))
+            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            server.starttls()
+            server.login(self.sender_email, self.sender_password)
+            server.sendmail(self.sender_email, email, msg.as_string())
+            server.quit()
+            logging.info(f"Welcome confirmation email sent successfully to {email}")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to send welcome confirmation email to {email}: {e}")
             return False
 
     def remove_subscriber(self, email):
@@ -190,29 +227,20 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
 
     def check_tickets(self):
-        """
-        Check if NEW tickets are available using an updated scraping method
-        to match the latest site structure (as of Aug 2025).
-        """
+        """Check if NEW tickets are available using an updated scraping method."""
         try:
             logging.info(f"Requesting URL: {self.url}")
             response = self.session.get(self.url, timeout=15)
             response.raise_for_status()
-
             soup = BeautifulSoup(response.content, 'html.parser')
-
             ticket_list_container = soup.find(id="list")
-
             no_listings_found = soup.find(id="no-listings-found")
-            # The 'hidden' attribute is a more reliable check than style
             if not ticket_list_container or (no_listings_found and not no_listings_found.has_attr('hidden')):
                 logging.info("No ticket container or 'no-listings-found' element is visible. No tickets available.")
                 self.known_tickets = set()
                 return []
 
-            # --- FIX #1: The website now uses a custom <twickets-listing> tag ---
             listing_elements = ticket_list_container.find_all('twickets-listing')
-
             if not listing_elements:
                 logging.info("Found ticket container, but it contains no '<twickets-listing>' elements.")
                 self.known_tickets = set()
@@ -221,28 +249,17 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
             current_tickets = []
             for listing in listing_elements:
                 try:
-                    # This selector for the details is still correct.
                     details_element = listing.select_one('[id^="listingSeatDetails"]')
-                    if not details_element:
-                        continue 
+                    if not details_element: continue
                     details_text = details_element.get_text(strip=True)
-
-                    # --- FIX #2: Extract price from the summary string ---
                     price = "Price not found"
                     summary_element = listing.select_one('[id^="listingTicketSummary"]')
                     if summary_element:
                         summary_text = summary_element.get_text(strip=True)
                         price_match = re.search(r'£\s?[\d,.]+', summary_text)
-                        if price_match:
-                            price = price_match.group(0)
-
+                        if price_match: price = price_match.group(0)
                     unique_id = hashlib.md5(details_text.encode()).hexdigest()
-
-                    current_tickets.append({
-                        'id': unique_id,
-                        'text': details_text,
-                        'price': price
-                    })
+                    current_tickets.append({'id': unique_id, 'text': details_text, 'price': price})
                 except Exception as e:
                     logging.warning(f"Could not parse a specific ticket listing. Error: {e}")
                     continue
@@ -253,14 +270,12 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
                 return []
             
             current_ticket_ids = {ticket['id'] for ticket in current_tickets}
-            
             if not self.known_tickets:
                 logging.info(f"Establishing baseline with {len(current_ticket_ids)} found tickets.")
                 self.known_tickets = current_ticket_ids
                 return current_tickets
             
             new_ticket_ids = current_ticket_ids - self.known_tickets
-
             if new_ticket_ids:
                 new_tickets = [t for t in current_tickets if t['id'] in new_ticket_ids]
                 logging.info(f"SUCCESS: Found {len(new_tickets)} new tickets!")
@@ -270,7 +285,6 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
                 logging.info("No new tickets found. Current listings are the same as before.")
                 self.known_tickets = self.known_tickets.intersection(current_ticket_ids)
                 return []
-
         except requests.RequestException as e:
             logging.error(f"Request error while checking tickets: {e}")
             return []
@@ -293,17 +307,11 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
                 tickets_info += f"\nTicket {i}: Price: {ticket.get('price', 'N/A')}, Details: {ticket.get('text', '')}\n"
             body = f"""
 Hi Admin,
-
 🔔 ADMIN ALERT: FIRST DIBS! 🔔
-
 You're getting this exclusive heads-up. {len(new_tickets)} new Oasis tickets have just been listed.
-
 {tickets_info}
-
 Event URL: {self.url}
-
 You have {self.first_dibs_delay} seconds before other subscribers are notified. Good luck!
-
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             """
             msg.attach(MIMEText(body, 'plain'))
@@ -322,10 +330,10 @@ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             logging.info("No subscribers to notify")
             return
         
-        recipients = self.subscribers
+        recipients = list(self.subscribers)
         if exclude_admin and self.admin_email:
             admin_email_lower = self.admin_email.lower()
-            recipients = [s for s in self.subscribers if s['email'].lower() != admin_email_lower]
+            recipients = [s for s in recipients if s['email'].lower() != admin_email_lower]
             logging.info(f"Excluding admin '{self.admin_email}' from general notification.")
         
         if not recipients:
@@ -351,24 +359,16 @@ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 name = subscriber.get('name', 'Oasis Fan')
                 body = f"""
 Hi {name}!
-
 🎸 BIBLICAL NEWS! 🎸
-
 {len(new_tickets)} NEW Oasis tickets are now available on Twickets!
 This could be your chance to witness the comeback of the century!
-
 Event URL: {self.url}
-
 {tickets_info}
-
 🚨 IMPORTANT: These are BRAND NEW listings that weren't there before!
 Don't Look Back in Anger - check the page NOW to secure your tickets before they're gone!
-
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
 You're gonna Live Forever with these Oasis memories!
 Rock and Roll Star treatment awaits! 🌟
-
 ---
 Mad for It? Keep this subscription active!
 To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
