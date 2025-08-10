@@ -38,14 +38,14 @@ class TwicketsMonitor:
         self.session = requests.Session()
         self.admin_email = admin_email
         self.first_dibs_delay = first_dibs_delay
-        
-        # --- NEW, MORE REALISTIC HEADERS TO AVOID 403 FORBIDDEN ERROR ---
+        self.homepage_url = "https://www.twickets.live/" # Define homepage URL
+
+        # Using the most realistic headers to avoid being blocked
         headers = {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
             'Cache-Control': 'max-age=0',
-            'Referer': 'https://www.google.com/', # A plausible referer
             'Sec-Ch-Ua': '"Google Chrome";v="127", "Chromium";v="127", "Not.A/Brand";v="24"',
             'Sec-Ch-Ua-Mobile': '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
@@ -239,16 +239,30 @@ To unsubscribe, reply with "UNSUBSCRIBE" in the subject line.
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
 
     def check_tickets(self):
-        """Check if NEW tickets are available using an updated scraping method."""
+        """
+        Check for tickets using a two-step process to mimic user navigation
+        and acquire necessary session cookies.
+        """
         try:
-            logging.info(f"Requesting URL: {self.url}")
+            # --- STEP 1: Visit the homepage to initialize a session and get cookies. ---
+            logging.info(f"Initializing session by visiting homepage: {self.homepage_url}")
+            self.session.get(self.homepage_url, timeout=15)
+            
+            # Update headers to include the Referer for the next request
+            self.session.headers['Referer'] = self.homepage_url
+            
+            # --- STEP 2: Visit the actual event page with the active session. ---
+            logging.info(f"Requesting event URL with active session: {self.url}")
             response = self.session.get(self.url, timeout=15)
             response.raise_for_status()
+
+            # --- The rest of the parsing logic is exactly the same ---
             soup = BeautifulSoup(response.content, 'html.parser')
+            
             ticket_list_container = soup.find(id="list")
             no_listings_found = soup.find(id="no-listings-found")
             if not ticket_list_container or (no_listings_found and not no_listings_found.has_attr('hidden')):
-                logging.info("No ticket container or 'no-listings-found' element is visible. No tickets available.")
+                logging.info("No ticket container or 'no-listings-found' element is visible.")
                 self.known_tickets = set()
                 return []
 
