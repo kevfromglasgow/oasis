@@ -31,14 +31,10 @@ logging.basicConfig(
 USERS_FILE = 'subscribers.json'
 STATUS_FILE = 'monitor_status.json'
 
-# NEW: Create a global lock for the Selenium driver to ensure thread safety
-SELENIUM_LOCK = threading.Lock()
-
-
-# This is cached so it's only created once per Streamlit session
+# This cached driver is for quick, interactive UI actions ONLY (e.g., Initialize Baseline)
 @st.cache_resource
 def get_driver():
-    """Sets up and returns a Selenium Chrome driver."""
+    """Sets up and returns a cached Selenium Chrome driver for UI actions."""
     options = Options()
     options.add_argument("--disable-gpu")
     options.add_argument("--headless")
@@ -65,7 +61,6 @@ class TwicketsMonitor:
         self.known_tickets = set()
         self.is_running = False
         self.subscribers = self.load_subscribers()
-        self.driver = None # Driver will be initialized inside the monitoring loop
 
     def load_subscribers(self):
         """Load subscribers from file"""
@@ -105,13 +100,11 @@ class TwicketsMonitor:
     def notify_new_subscriber_of_current_tickets(self, email, name):
         """Check for current tickets and notify new subscriber immediately."""
         try:
-            temp_driver = get_driver() # Get the cached driver for a one-off check
+            temp_driver = get_driver() # Use the fast, cached driver for this UI action
             current_tickets = self.check_tickets(driver=temp_driver, is_one_off_check=True)
             if current_tickets:
-                logging.info(f"Found {len(current_tickets)} current tickets for new subscriber {email}")
                 self.send_welcome_email_with_current_tickets(email, name, current_tickets)
             else:
-                logging.info(f"No current tickets. Sending welcome confirmation to new subscriber {email}")
                 self.send_welcome_confirmation_email(email, name)
         except Exception as e:
             logging.error(f"Error during one-off check for new subscriber: {e}")
@@ -184,79 +177,72 @@ class TwicketsMonitor:
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
 
     def check_tickets(self, driver, is_one_off_check=False):
-        """
-        Check for new tickets using a Selenium driver, protected by a lock
-        to ensure thread safety.
-        """
-        with SELENIUM_LOCK:
+        """Checks for new tickets using a provided Selenium driver."""
+        try:
+            driver.get(self.url)
+            time.sleep(3) 
+
             try:
-                driver.get(self.url)
-                time.sleep(3) 
-
-                try:
-                    no_listings = driver.find_element(By.ID, 'no-listings-found')
-                    if 'display: none' not in no_listings.get_attribute('style'):
-                        logging.info("No tickets available ('no-listings-found' is visible).")
-                        if not is_one_off_check: self.known_tickets = set()
-                        return []
-                except NoSuchElementException:
-                    pass
-
-                current_tickets = []
-                listing_elements = driver.find_elements(By.XPATH, "//ul[@id='list']//twickets-listing")
-                
-                for listing in listing_elements:
-                    try:
-                        details_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingSeatDetails')]")
-                        details_text = details_element.text.strip()
-                        
-                        price = "Price not found"
-                        summary_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingTicketSummary')]")
-                        summary_text = summary_element.text.strip()
-                        price_match = re.search(r'£\s?[\d,.]+', summary_text)
-                        if price_match: price = price_match.group(0)
-
-                        unique_id = hashlib.md5(details_text.encode()).hexdigest()
-                        current_tickets.append({'id': unique_id, 'text': details_text, 'price': price})
-                    except Exception:
-                        continue 
-
-                if not current_tickets:
-                    logging.info("No valid ticket elements found on page.")
+                no_listings = driver.find_element(By.ID, 'no-listings-found')
+                if 'display: none' not in no_listings.get_attribute('style'):
                     if not is_one_off_check: self.known_tickets = set()
                     return []
-                
-                if is_one_off_check:
-                    return current_tickets
+            except NoSuchElementException:
+                pass
+
+            current_tickets = []
+            listing_elements = driver.find_elements(By.XPATH, "//ul[@id='list']//twickets-listing")
+            
+            for listing in listing_elements:
+                try:
+                    details_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingSeatDetails')]")
+                    details_text = details_element.text.strip()
                     
-                current_ticket_ids = {ticket['id'] for ticket in current_tickets}
-                if not self.known_tickets:
-                    logging.info(f"Establishing baseline with {len(current_ticket_ids)} found tickets.")
-                    self.known_tickets = current_ticket_ids
-                    return [] 
+                    price = "Price not found"
+                    summary_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingTicketSummary')]")
+                    summary_text = summary_element.text.strip()
+                    price_match = re.search(r'£\s?[\d,.]+', summary_text)
+                    if price_match: price = price_match.group(0)
+
+                    unique_id = hashlib.md5(details_text.encode()).hexdigest()
+                    current_tickets.append({'id': unique_id, 'text': details_text, 'price': price})
+                except Exception:
+                    continue 
+
+            if not current_tickets:
+                if not is_one_off_check: self.known_tickets = set()
+                return []
+            
+            if is_one_off_check:
+                return current_tickets
                 
-                new_ticket_ids = current_ticket_ids - self.known_tickets
-                if new_ticket_ids:
-                    new_tickets = [t for t in current_tickets if t['id'] in new_ticket_ids]
-                    logging.info(f"SUCCESS: Found {len(new_tickets)} new tickets!")
-                    self.known_tickets.update(new_ticket_ids)
-                    return new_tickets
-                else:
-                    logging.info("No new tickets found.")
-                    self.known_tickets = self.known_tickets.intersection(current_ticket_ids)
-                    return []
-            except WebDriverException as e:
-                logging.error(f"WebDriver error checking tickets: {e.msg}")
-                st.error("Browser session may have crashed. Consider rebooting the app if errors persist.")
-                self.is_running = False
+            current_ticket_ids = {ticket['id'] for ticket in current_tickets}
+            if not self.known_tickets:
+                self.known_tickets = current_ticket_ids
+                return [] 
+            
+            new_ticket_ids = current_ticket_ids - self.known_tickets
+            if new_ticket_ids:
+                new_tickets = [t for t in current_tickets if t['id'] in new_ticket_ids]
+                self.known_tickets.update(new_ticket_ids)
+                return new_tickets
+            else:
+                self.known_tickets = self.known_tickets.intersection(current_ticket_ids)
                 return []
-            except Exception as e:
-                logging.error(f"Unexpected error in check_tickets: {e}")
-                return []
+        except WebDriverException as e:
+            logging.error(f"WebDriver error checking tickets: {e.msg}")
+            st.error("Browser session may have crashed. Consider rebooting the app.")
+            self.is_running = False
+            return []
+        except Exception as e:
+            logging.error(f"Unexpected error in check_tickets: {e}")
+            return []
     
     def send_admin_first_dibs_notification(self, new_tickets):
+        # This function is unchanged
         if not self.admin_email: return
         try:
+            # ... (email sending logic)
             msg = MIMEMultipart()
             msg['From'] = self.sender_email
             msg['To'] = self.admin_email
@@ -275,7 +261,9 @@ class TwicketsMonitor:
             logging.error(f"Failed to send 'First Dibs' email to admin {self.admin_email}: {e}")
 
     def send_email_notifications(self, new_tickets, exclude_admin=False):
+        # This function is unchanged
         if not self.subscribers: return
+        # ... (email sending logic)
         recipients = list(self.subscribers)
         if exclude_admin and self.admin_email:
             recipients = [s for s in recipients if s['email'].lower() != self.admin_email.lower()]
@@ -304,15 +292,28 @@ class TwicketsMonitor:
                 logging.error(f"Failed to send email to {subscriber['email']}: {e}")
 
     def monitor_loop(self, check_interval=30, first_dibs_enabled=False):
-        """Main monitoring loop using Selenium."""
+        """
+        Main monitoring loop. It creates and manages its own dedicated driver
+        to ensure stability in a background thread on Streamlit Cloud.
+        """
         status = self.get_status()
         total_checks = status.get('total_checks', 0)
         tickets_found = status.get('tickets_found', 0)
         self.is_running = True
         
+        driver = None
         try:
-            driver = get_driver()
-            logging.info("Selenium driver successfully referenced for monitoring loop.")
+            # Create a NEW, dedicated driver instance for this thread.
+            options = Options()
+            options.add_argument("--disable-gpu")
+            options.add_argument("--headless")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
+            service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+            driver = webdriver.Chrome(service=service, options=options)
+            
+            logging.info("Dedicated Selenium driver initialized for monitoring loop.")
             
             while self.is_running:
                 current_time = datetime.now()
@@ -323,7 +324,6 @@ class TwicketsMonitor:
                 
                 if new_tickets:
                     tickets_found += len(new_tickets)
-                    logging.info(f"🎫 NEW TICKETS DETECTED! Found {len(new_tickets)} new tickets.")
                     if first_dibs_enabled and self.admin_email:
                         self.send_admin_first_dibs_notification(new_tickets)
                         time.sleep(self.first_dibs_delay)
@@ -336,11 +336,14 @@ class TwicketsMonitor:
                     if not self.is_running: break
                     time.sleep(1)
         except Exception as e:
-            logging.error(f"Error in monitoring loop: {e}")
+            logging.error(f"FATAL Error in monitoring loop: {e}")
         finally:
+            if driver:
+                driver.quit()
+                logging.info("Dedicated monitoring driver has been shut down.")
+            self.is_running = False
             self.update_status({'is_running': False, 'last_check': datetime.now().isoformat(), 'total_checks': total_checks, 'tickets_found': tickets_found, 'subscriber_count': len(self.subscribers)})
 
-# --- GLOBAL FUNCTIONS FOR STREAMLIT ---
 monitor = None
 monitor_thread = None
 
@@ -394,114 +397,7 @@ def authenticate_admin(password):
         return True
     return False
 
-# --- MAIN STREAMLIT APP UI ---
 def main():
     st.set_page_config(page_title="Oasis Ticket Checker", page_icon="🎸", layout="wide")
     col1, col2, col3 = st.columns([1, 2, 1])
-    with col2: st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?20230326104117", width=400)
-    st.title("Oasis Ticket Checker")
-    st.markdown("Get notified instantly when new Oasis tickets become available on Twickets!")
-    
-    monitor = init_monitor()
-    if not monitor: st.stop()
-    
-    status = monitor.get_status()
-    if status.get('last_check'):
-        last_check_dt = datetime.fromisoformat(status['last_check'])
-        time_diff = datetime.now() - last_check_dt
-        if time_diff.total_seconds() < 60:
-            time_ago, status_color = f"{int(time_diff.total_seconds())}s ago", "🟢"
-        elif time_diff.total_seconds() < 3600:
-            time_ago, status_color = f"{int(time_diff.total_seconds() / 60)}m ago", "🟢" if time_diff.total_seconds() < 300 else "🟡"
-        else:
-            time_ago, status_color = f"{int(time_diff.total_seconds() / 3600)}h ago", "🔴"
-        st.info(f"{status_color} **Last check:** {last_check_dt.strftime('%H:%M:%S')} ({time_ago})")
-    else:
-        st.warning("⏸️ **Monitoring not started yet**")
-    
-    st.markdown("---")
-    
-    with st.sidebar:
-        st.header("⚙️ Admin Controls")
-        if not is_admin_authenticated():
-            admin_password = st.text_input("Admin Password", type="password", key="admin_login")
-            if st.button("Login"):
-                if authenticate_admin(admin_password):
-                    st.success("Admin authenticated!"); st.rerun()
-                else:
-                    st.error("Invalid admin password")
-        else:
-            st.success("🔓 Admin authenticated")
-            if monitor.admin_email:
-                st.checkbox("🔔 Enable 'First Dibs' for Admin", key="first_dibs_enabled", help=f"Notify {monitor.admin_email} {monitor.first_dibs_delay}s before others.")
-            
-            if st.button("🚀 Start Monitoring"):
-                if start_monitoring():
-                    st.success("Monitoring started with Selenium!")
-                else:
-                    st.info("Monitoring is already running")
-            
-            if st.button("🔄 Initialize Baseline"):
-                if monitor:
-                    with st.spinner("Initializing driver and checking page..."):
-                        temp_driver = get_driver()
-                        baseline_tickets = monitor.check_tickets(driver=temp_driver, is_one_off_check=True)
-                        baseline_count = len(baseline_tickets)
-                        monitor.known_tickets = {t['id'] for t in baseline_tickets}
-                    if baseline_count > 0:
-                        st.success(f"✅ Baseline set! Found {baseline_count} existing tickets.")
-                    else:
-                        st.success("✅ No tickets currently available.")
-            
-            if st.button("⏹️ Stop Monitoring"):
-                stop_monitoring(); st.success("Monitoring stopped!")
-            
-            if st.button("🚪 Logout"):
-                st.session_state.admin_authenticated = False; st.rerun()
-
-        status = monitor.get_status()
-        st.subheader("📊 Status")
-        st.metric("Monitoring Status", "🟢 Active" if status.get('is_running') else "🔴 Stopped")
-        if status.get('last_check'):
-            st.write(f"**Last Check:** {datetime.fromisoformat(status['last_check']).strftime('%H:%M:%S')}")
-        st.write(f"**Total Checks:** {status.get('total_checks', 0)}")
-        st.write(f"**Tickets Found:** {status.get('tickets_found', 0)}")
-        st.write(f"**Subscribers:** {monitor.get_subscriber_count()}")
-
-    main_col1, main_col2 = st.columns([2, 1])
-    with main_col1:
-        st.header("📧 Subscribe for Oasis Ticket Alerts")
-        with st.form("subscription_form"):
-            email = st.text_input("Email Address")
-            name = st.text_input("Name (Optional)")
-            if st.form_submit_button("🎸 Subscribe for Oasis Tickets"):
-                if email:
-                    success, message = monitor.add_subscriber(email, name)
-                    if success: st.success(f"🌟 {message}"); st.balloons()
-                    else: st.error(message)
-                else: st.error("Please enter an email address")
-        
-        st.header("🔕 Unsubscribe")
-        with st.form("unsubscribe_form"):
-            unsub_email = st.text_input("Your email address")
-            if st.form_submit_button("Unsubscribe"):
-                if unsub_email and monitor.remove_subscriber(unsub_email):
-                    st.success("Email unsubscribed successfully!")
-                else: st.warning("Email not found.")
-    
-    with main_col2:
-        st.header("ℹ️ How it works")
-        st.markdown("1. **Subscribe** with your email\n2. Our monitor checks Twickets using a real browser\n3. **Get notified** instantly for NEW tickets")
-        st.markdown("**Event Being Monitored:**")
-        if 'url' in st.secrets.get("twickets", {}):
-            st.markdown(f"🎸 [View on Twickets]({st.secrets['twickets']['url']})")
-        st.markdown("---")
-        st.subheader("🎸 Supersonic Fans")
-        subscriber_count = monitor.get_subscriber_count()
-        if subscriber_count > 0:
-            st.success(f"🌟 **{subscriber_count}** fans are subscribed!")
-        else:
-            st.info("Be the first to subscribe! 🚀")
-
-if __name__ == "__main__":
-    main()
+    with col2: st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?20230
