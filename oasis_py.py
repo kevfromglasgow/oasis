@@ -239,10 +239,8 @@ class TwicketsMonitor:
             return []
     
     def send_admin_first_dibs_notification(self, new_tickets):
-        # This function is unchanged
         if not self.admin_email: return
         try:
-            # ... (email sending logic)
             msg = MIMEMultipart()
             msg['From'] = self.sender_email
             msg['To'] = self.admin_email
@@ -261,9 +259,7 @@ class TwicketsMonitor:
             logging.error(f"Failed to send 'First Dibs' email to admin {self.admin_email}: {e}")
 
     def send_email_notifications(self, new_tickets, exclude_admin=False):
-        # This function is unchanged
         if not self.subscribers: return
-        # ... (email sending logic)
         recipients = list(self.subscribers)
         if exclude_admin and self.admin_email:
             recipients = [s for s in recipients if s['email'].lower() != self.admin_email.lower()]
@@ -400,4 +396,110 @@ def authenticate_admin(password):
 def main():
     st.set_page_config(page_title="Oasis Ticket Checker", page_icon="🎸", layout="wide")
     col1, col2, col3 = st.columns([1, 2, 1])
-    with col2: st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?20230
+    with col2: st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?2023026104117", width=400)
+    st.title("Oasis Ticket Checker")
+    st.markdown("Get notified instantly when new Oasis tickets become available on Twickets!")
+    
+    monitor = init_monitor()
+    if not monitor: st.stop()
+    
+    status = monitor.get_status()
+    if status.get('last_check'):
+        last_check_dt = datetime.fromisoformat(status['last_check'])
+        time_diff = datetime.now() - last_check_dt
+        if time_diff.total_seconds() < 60:
+            time_ago, status_color = f"{int(time_diff.total_seconds())}s ago", "🟢"
+        elif time_diff.total_seconds() < 3600:
+            time_ago, status_color = f"{int(time_diff.total_seconds() / 60)}m ago", "🟢" if time_diff.total_seconds() < 300 else "🟡"
+        else:
+            time_ago, status_color = f"{int(time_diff.total_seconds() / 3600)}h ago", "🔴"
+        st.info(f"{status_color} **Last check:** {last_check_dt.strftime('%H:%M:%S')} ({time_ago})")
+    else:
+        st.warning("⏸️ **Monitoring not started yet**")
+    
+    st.markdown("---")
+    
+    with st.sidebar:
+        st.header("⚙️ Admin Controls")
+        if not is_admin_authenticated():
+            admin_password = st.text_input("Admin Password", type="password", key="admin_login")
+            if st.button("Login"):
+                if authenticate_admin(admin_password):
+                    st.success("Admin authenticated!"); st.rerun()
+                else:
+                    st.error("Invalid admin password")
+        else:
+            st.success("🔓 Admin authenticated")
+            if monitor.admin_email:
+                st.checkbox("🔔 Enable 'First Dibs' for Admin", key="first_dibs_enabled", help=f"Notify {monitor.admin_email} {monitor.first_dibs_delay}s before others.")
+            
+            if st.button("🚀 Start Monitoring"):
+                if start_monitoring():
+                    st.success("Monitoring started with Selenium!")
+                else:
+                    st.info("Monitoring is already running")
+            
+            if st.button("🔄 Initialize Baseline"):
+                if monitor:
+                    with st.spinner("Initializing driver and checking page..."):
+                        temp_driver = get_driver()
+                        baseline_tickets = monitor.check_tickets(driver=temp_driver, is_one_off_check=True)
+                        baseline_count = len(baseline_tickets)
+                        monitor.known_tickets = {t['id'] for t in baseline_tickets}
+                    if baseline_count > 0:
+                        st.success(f"✅ Baseline set! Found {baseline_count} existing tickets.")
+                    else:
+                        st.success("✅ No tickets currently available.")
+            
+            if st.button("⏹️ Stop Monitoring"):
+                stop_monitoring(); st.success("Monitoring stopped!")
+            
+            if st.button("🚪 Logout"):
+                st.session_state.admin_authenticated = False; st.rerun()
+
+        status = monitor.get_status()
+        st.subheader("📊 Status")
+        st.metric("Monitoring Status", "🟢 Active" if status.get('is_running') else "🔴 Stopped")
+        if status.get('last_check'):
+            st.write(f"**Last Check:** {datetime.fromisoformat(status['last_check']).strftime('%H:%M:%S')}")
+        st.write(f"**Total Checks:** {status.get('total_checks', 0)}")
+        st.write(f"**Tickets Found:** {status.get('tickets_found', 0)}")
+        st.write(f"**Subscribers:** {monitor.get_subscriber_count()}")
+
+    main_col1, main_col2 = st.columns([2, 1])
+    with main_col1:
+        st.header("📧 Subscribe for Oasis Ticket Alerts")
+        with st.form("subscription_form"):
+            email = st.text_input("Email Address")
+            name = st.text_input("Name (Optional)")
+            if st.form_submit_button("🎸 Subscribe for Oasis Tickets"):
+                if email:
+                    success, message = monitor.add_subscriber(email, name)
+                    if success: st.success(f"🌟 {message}"); st.balloons()
+                    else: st.error(message)
+                else: st.error("Please enter an email address")
+        
+        st.header("🔕 Unsubscribe")
+        with st.form("unsubscribe_form"):
+            unsub_email = st.text_input("Your email address")
+            if st.form_submit_button("Unsubscribe"):
+                if unsub_email and monitor.remove_subscriber(unsub_email):
+                    st.success("Email unsubscribed successfully!")
+                else: st.warning("Email not found.")
+    
+    with main_col2:
+        st.header("ℹ️ How it works")
+        st.markdown("1. **Subscribe** with your email\n2. Our monitor checks Twickets using a real browser\n3. **Get notified** instantly for NEW tickets")
+        st.markdown("**Event Being Monitored:**")
+        if 'url' in st.secrets.get("twickets", {}):
+            st.markdown(f"🎸 [View on Twickets]({st.secrets['twickets']['url']})")
+        st.markdown("---")
+        st.subheader("🎸 Supersonic Fans")
+        subscriber_count = monitor.get_subscriber_count()
+        if subscriber_count > 0:
+            st.success(f"🌟 **{subscriber_count}** fans are subscribed!")
+        else:
+            st.info("Be the first to subscribe! 🚀")
+
+if __name__ == "__main__":
+    main()
