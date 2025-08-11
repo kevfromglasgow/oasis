@@ -285,7 +285,7 @@ def main():
     
     monitor = st.session_state.monitor
 
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?2023026104117", width=400, use_column_width='auto')
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?2023026104117", use_container_width=True)
     st.title("Oasis Ticket Checker")
     
     status = monitor.get_status()
