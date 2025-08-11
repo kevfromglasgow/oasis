@@ -12,7 +12,7 @@ from email.mime.multipart import MIMEMultipart
 import hashlib
 import re
 
-# --- NEW IMPORTS FOR SELENIUM ---
+# Selenium Imports
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -27,13 +27,15 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# File to store user subscriptions
+# File to store user subscriptions and status
 USERS_FILE = 'subscribers.json'
 STATUS_FILE = 'monitor_status.json'
 
+# NEW: Create a global lock for the Selenium driver to ensure thread safety
+SELENIUM_LOCK = threading.Lock()
 
-# --- NEW SELENIUM DRIVER SETUP ---
-# This is cached so it's only created once
+
+# This is cached so it's only created once per Streamlit session
 @st.cache_resource
 def get_driver():
     """Sets up and returns a Selenium Chrome driver."""
@@ -42,10 +44,8 @@ def get_driver():
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    # A more modern user agent
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
     
-    # This is the key part for Streamlit Cloud
     service = Service(
         ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
     )
@@ -62,14 +62,10 @@ class TwicketsMonitor:
         self.smtp_port = smtp_port
         self.admin_email = admin_email
         self.first_dibs_delay = first_dibs_delay
-        
-        # --- CLASS ATTRIBUTES ---
         self.known_tickets = set()
         self.is_running = False
         self.subscribers = self.load_subscribers()
-        
-        # Driver will be initialized inside the monitoring loop for thread safety
-        self.driver = None
+        self.driver = None # Driver will be initialized inside the monitoring loop
 
     def load_subscribers(self):
         """Load subscribers from file"""
@@ -91,8 +87,6 @@ class TwicketsMonitor:
             logging.error(f"Error saving subscribers: {e}")
 
     def add_subscriber(self, email, name=""):
-        # This function and the email functions below remain largely the same.
-        # I'm including the full class for completeness.
         email = email.lower().strip()
         for subscriber in self.subscribers:
             if subscriber['email'] == email:
@@ -110,9 +104,8 @@ class TwicketsMonitor:
 
     def notify_new_subscriber_of_current_tickets(self, email, name):
         """Check for current tickets and notify new subscriber immediately."""
-        temp_driver = None
         try:
-            temp_driver = get_driver() # Get a temporary driver for a one-off check
+            temp_driver = get_driver() # Get the cached driver for a one-off check
             current_tickets = self.check_tickets(driver=temp_driver, is_one_off_check=True)
             if current_tickets:
                 logging.info(f"Found {len(current_tickets)} current tickets for new subscriber {email}")
@@ -122,12 +115,8 @@ class TwicketsMonitor:
                 self.send_welcome_confirmation_email(email, name)
         except Exception as e:
             logging.error(f"Error during one-off check for new subscriber: {e}")
-        finally:
-            # The cached driver from get_driver() is managed by Streamlit, no need to quit it here.
-            pass
 
     def send_welcome_email_with_current_tickets(self, email, name, tickets):
-        # This function is unchanged
         try:
             msg = MIMEMultipart()
             msg['From'] = self.sender_email
@@ -151,7 +140,6 @@ class TwicketsMonitor:
             logging.error(f"Failed to send welcome email to {email}: {e}")
 
     def send_welcome_confirmation_email(self, email, name):
-        # This function is unchanged
         try:
             msg = MIMEMultipart()
             msg['From'] = self.sender_email
@@ -169,7 +157,6 @@ class TwicketsMonitor:
             logging.error(f"Failed to send welcome confirmation email to {email}: {e}")
 
     def remove_subscriber(self, email):
-        """Remove a subscriber"""
         email = email.lower().strip()
         original_count = len(self.subscribers)
         self.subscribers = [s for s in self.subscribers if s['email'] != email]
@@ -177,11 +164,9 @@ class TwicketsMonitor:
         return len(self.subscribers) < original_count
 
     def get_subscriber_count(self):
-        """Get number of active subscribers"""
         return len(self.subscribers)
 
     def update_status(self, status_data):
-        """Update monitoring status"""
         try:
             with open(STATUS_FILE, 'w') as f:
                 json.dump(status_data, f, indent=2)
@@ -189,7 +174,6 @@ class TwicketsMonitor:
             logging.error(f"Error updating status: {e}")
 
     def get_status(self):
-        """Get current monitoring status"""
         try:
             if os.path.exists(STATUS_FILE):
                 with open(STATUS_FILE, 'r') as f:
@@ -200,76 +184,76 @@ class TwicketsMonitor:
             return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
 
     def check_tickets(self, driver, is_one_off_check=False):
-        """Check for new tickets using a Selenium driver."""
-        try:
-            driver.get(self.url)
-            time.sleep(3) # Allow time for JavaScript to load content
-
-            # Check if the "no listings" element is visible
+        """
+        Check for new tickets using a Selenium driver, protected by a lock
+        to ensure thread safety.
+        """
+        with SELENIUM_LOCK:
             try:
-                no_listings = driver.find_element(By.ID, 'no-listings-found')
-                if 'display: none' not in no_listings.get_attribute('style'):
-                    logging.info("No tickets available ('no-listings-found' is visible).")
+                driver.get(self.url)
+                time.sleep(3) 
+
+                try:
+                    no_listings = driver.find_element(By.ID, 'no-listings-found')
+                    if 'display: none' not in no_listings.get_attribute('style'):
+                        logging.info("No tickets available ('no-listings-found' is visible).")
+                        if not is_one_off_check: self.known_tickets = set()
+                        return []
+                except NoSuchElementException:
+                    pass
+
+                current_tickets = []
+                listing_elements = driver.find_elements(By.XPATH, "//ul[@id='list']//twickets-listing")
+                
+                for listing in listing_elements:
+                    try:
+                        details_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingSeatDetails')]")
+                        details_text = details_element.text.strip()
+                        
+                        price = "Price not found"
+                        summary_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingTicketSummary')]")
+                        summary_text = summary_element.text.strip()
+                        price_match = re.search(r'£\s?[\d,.]+', summary_text)
+                        if price_match: price = price_match.group(0)
+
+                        unique_id = hashlib.md5(details_text.encode()).hexdigest()
+                        current_tickets.append({'id': unique_id, 'text': details_text, 'price': price})
+                    except Exception:
+                        continue 
+
+                if not current_tickets:
+                    logging.info("No valid ticket elements found on page.")
                     if not is_one_off_check: self.known_tickets = set()
                     return []
-            except NoSuchElementException:
-                pass # It's good if this element is not found
-
-            current_tickets = []
-            # Using precise XPath based on our previous findings
-            listing_elements = driver.find_elements(By.XPATH, "//ul[@id='list']//twickets-listing")
-            
-            for listing in listing_elements:
-                try:
-                    details_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingSeatDetails')]")
-                    details_text = details_element.text.strip()
-                    
-                    price = "Price not found"
-                    summary_element = listing.find_element(By.XPATH, ".//span[starts-with(@id, 'listingTicketSummary')]")
-                    summary_text = summary_element.text.strip()
-                    price_match = re.search(r'£\s?[\d,.]+', summary_text)
-                    if price_match: price = price_match.group(0)
-
-                    unique_id = hashlib.md5(details_text.encode()).hexdigest()
-                    current_tickets.append({'id': unique_id, 'text': details_text, 'price': price})
-                except Exception:
-                    continue # Ignore listings that can't be parsed
-
-            if not current_tickets:
-                logging.info("No valid ticket elements found on page.")
-                if not is_one_off_check: self.known_tickets = set()
-                return []
-            
-            # For one-off checks (like for a new subscriber), just return what's available
-            if is_one_off_check:
-                return current_tickets
                 
-            current_ticket_ids = {ticket['id'] for ticket in current_tickets}
-            if not self.known_tickets:
-                logging.info(f"Establishing baseline with {len(current_ticket_ids)} found tickets.")
-                self.known_tickets = current_ticket_ids
-                return [] # Don't notify on first run
-            
-            new_ticket_ids = current_ticket_ids - self.known_tickets
-            if new_ticket_ids:
-                new_tickets = [t for t in current_tickets if t['id'] in new_ticket_ids]
-                logging.info(f"SUCCESS: Found {len(new_tickets)} new tickets!")
-                self.known_tickets.update(new_ticket_ids)
-                return new_tickets
-            else:
-                logging.info("No new tickets found.")
-                self.known_tickets = self.known_tickets.intersection(current_ticket_ids)
+                if is_one_off_check:
+                    return current_tickets
+                    
+                current_ticket_ids = {ticket['id'] for ticket in current_tickets}
+                if not self.known_tickets:
+                    logging.info(f"Establishing baseline with {len(current_ticket_ids)} found tickets.")
+                    self.known_tickets = current_ticket_ids
+                    return [] 
+                
+                new_ticket_ids = current_ticket_ids - self.known_tickets
+                if new_ticket_ids:
+                    new_tickets = [t for t in current_tickets if t['id'] in new_ticket_ids]
+                    logging.info(f"SUCCESS: Found {len(new_tickets)} new tickets!")
+                    self.known_tickets.update(new_ticket_ids)
+                    return new_tickets
+                else:
+                    logging.info("No new tickets found.")
+                    self.known_tickets = self.known_tickets.intersection(current_ticket_ids)
+                    return []
+            except WebDriverException as e:
+                logging.error(f"WebDriver error checking tickets: {e.msg}")
+                st.error("Browser session may have crashed. Consider rebooting the app if errors persist.")
+                self.is_running = False
                 return []
-
-        except WebDriverException as e:
-            logging.error(f"WebDriver error checking tickets: {e.msg}")
-            return []
-        except Exception as e:
-            logging.error(f"Unexpected error in check_tickets: {e}")
-            return []
+            except Exception as e:
+                logging.error(f"Unexpected error in check_tickets: {e}")
+                return []
     
-    # Email functions (send_admin_first_dibs_notification, send_email_notifications) are unchanged
-    # They are included here for completeness
     def send_admin_first_dibs_notification(self, new_tickets):
         if not self.admin_email: return
         try:
@@ -326,17 +310,14 @@ class TwicketsMonitor:
         tickets_found = status.get('tickets_found', 0)
         self.is_running = True
         
-        # Initialize the driver inside the thread for safety
-        driver = None
         try:
             driver = get_driver()
-            logging.info("Selenium driver successfully initialized for monitoring loop.")
+            logging.info("Selenium driver successfully referenced for monitoring loop.")
             
             while self.is_running:
                 current_time = datetime.now()
                 logging.info(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] Checking for new tickets...")
                 
-                # Pass the active driver to the check function
                 new_tickets = self.check_tickets(driver=driver)
                 total_checks += 1
                 
@@ -357,15 +338,9 @@ class TwicketsMonitor:
         except Exception as e:
             logging.error(f"Error in monitoring loop: {e}")
         finally:
-            if driver:
-                # The cached driver is managed by Streamlit, so we don't quit it here.
-                # If we didn't cache it, we would use driver.quit().
-                pass
             self.update_status({'is_running': False, 'last_check': datetime.now().isoformat(), 'total_checks': total_checks, 'tickets_found': tickets_found, 'subscriber_count': len(self.subscribers)})
 
 # --- GLOBAL FUNCTIONS FOR STREAMLIT ---
-
-# monitor instance is now simpler, as driver is handled by get_driver()
 monitor = None
 monitor_thread = None
 
@@ -373,7 +348,6 @@ def init_monitor():
     global monitor
     if monitor is None:
         try:
-            # All secrets remain the same
             sender_email = st.secrets["email"]["sender_email"]
             sender_password = st.secrets["email"]["sender_password"]
             url = st.secrets["twickets"]["url"]
@@ -421,7 +395,6 @@ def authenticate_admin(password):
     return False
 
 # --- MAIN STREAMLIT APP UI ---
-# The UI part of the code is largely unchanged.
 def main():
     st.set_page_config(page_title="Oasis Ticket Checker", page_icon="🎸", layout="wide")
     col1, col2, col3 = st.columns([1, 2, 1])
