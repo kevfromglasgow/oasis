@@ -40,6 +40,7 @@ def get_driver():
     service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
     return webdriver.Chrome(service=service, options=options)
 
+
 class TwicketsMonitor:
     def __init__(self, url, sender_email, sender_password, admin_email=None, first_dibs_delay=90, smtp_server="smtp.gmail.com", smtp_port=587):
         self.url = url
@@ -66,6 +67,21 @@ class TwicketsMonitor:
             with open(USERS_FILE, 'w') as f: json.dump(self.subscribers, f, indent=2)
         except Exception as e:
             logging.error(f"Error saving subscribers: {e}")
+    
+    # --- METHOD RESTORED ---
+    def get_status(self):
+        try:
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, 'r') as f:
+                    return json.load(f)
+            return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
+        except Exception as e:
+            logging.error(f"Error getting status: {e}")
+            return {'is_running': False, 'last_check': None, 'total_checks': 0, 'tickets_found': 0}
+
+    # --- METHOD RESTORED ---
+    def get_subscriber_count(self):
+        return len(self.subscribers)
 
     def add_subscriber(self, email, name=""):
         email = email.lower().strip()
@@ -226,7 +242,7 @@ class TwicketsMonitor:
             logging.info("Dedicated monitoring driver shut down.")
             self.is_running = False
             self.update_status({'is_running': False, 'last_check': datetime.now().isoformat(), 'total_checks': total_checks, 'tickets_found': tickets_found})
-            st.session_state.monitoring_active = False # Signal UI that thread has stopped
+            st.session_state.monitoring_active = False
 
 def start_monitoring():
     if not st.session_state.get('monitoring_active', False):
@@ -253,7 +269,6 @@ def stop_monitoring():
 def main():
     st.set_page_config(page_title="Oasis Ticket Checker", page_icon="🎸", layout="wide")
 
-    # --- SESSION STATE INITIALIZATION ---
     if 'monitor' not in st.session_state:
         try:
             st.session_state.monitor = TwicketsMonitor(
@@ -270,8 +285,7 @@ def main():
     
     monitor = st.session_state.monitor
 
-    # --- UI ---
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?2023026104117", width=400)
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Oasis_Logo.svg/1600px-Oasis_Logo.svg.png?2023026104117", width=400, use_column_width='auto')
     st.title("Oasis Ticket Checker")
     
     status = monitor.get_status()
@@ -279,7 +293,7 @@ def main():
         last_check_dt = datetime.fromisoformat(status['last_check'])
         time_diff_secs = (datetime.now() - last_check_dt).total_seconds()
         is_stale = time_diff_secs > (st.secrets.get("monitoring", {}).get("check_interval", 30) * 2)
-        if st.session_state.monitoring_active and is_stale:
+        if st.session_state.get('monitoring_active', False) and is_stale:
             status_color, time_ago = "🔴", "stalled"
         else:
             time_ago = f"{int(time_diff_secs)}s ago" if time_diff_secs < 60 else f"{int(time_diff_secs / 60)}m ago"
@@ -313,11 +327,10 @@ def main():
                 st.rerun()
 
         st.subheader("📊 Status")
-        status_text = "🟢 Active" if st.session_state.monitoring_active else "🔴 Stopped"
+        status_text = "🟢 Active" if st.session_state.get('monitoring_active', False) else "🔴 Stopped"
         st.metric("Monitoring Status", status_text)
-        st.write(f"**Subscribers:** {len(monitor.subscribers)}")
+        st.write(f"**Subscribers:** {monitor.get_subscriber_count()}")
 
-    # Main content columns
     col1, col2 = st.columns(2)
     with col1:
         st.header("📧 Subscribe for Alerts")
